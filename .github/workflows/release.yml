@@ -34,13 +34,13 @@ jobs:
       - shell: bash
         run: |
           set -euo pipefail
-          BIN="site-encrypt"
-          [ "$RUNNER_OS" = "Windows" ] && BIN="site-encrypt.exe"
-          tar -czf "site-encrypt-${{ matrix.target }}.tar.gz" -C target/release "$BIN"
+          BIN="ssg-encrypt"
+          [ "$RUNNER_OS" = "Windows" ] && BIN="ssg-encrypt.exe"
+          tar -czf "ssg-encrypt-${{ matrix.target }}.tar.gz" -C target/release "$BIN"
       - uses: actions/upload-artifact@v4
         with:
-          name: site-encrypt-${{ matrix.target }}
-          path: site-encrypt-${{ matrix.target }}.tar.gz
+          name: ssg-encrypt-${{ matrix.target }}
+          path: ssg-encrypt-${{ matrix.target }}.tar.gz
 
   release:
     needs: build
@@ -52,5 +52,5 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/site-encrypt-*.tar.gz
+          files: dist/ssg-encrypt-*.tar.gz
           generate_release_notes: true

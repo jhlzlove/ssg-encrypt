@@ -1,4 +1,4 @@
-# site-encrypt configuration example (minimal)
+# ssg-encrypt configuration example (minimal)
 # Copy this file to encrypt.toml and adjust. encrypt.toml is git-ignored —
 # never commit real passwords. On CI, leave [passwords] empty and provide
 # passwords via env vars instead (see README):

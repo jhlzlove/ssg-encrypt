@@ -1,9 +1,9 @@
-# site-encrypt
+# ssg-encrypt
 
 Generator-agnostic static HTML post-processor for password-protected content. It runs **after** your static-site generator (Zola, Hugo, or any other) builds, encrypting marked nodes in-place before deployment.
 
 ```
-SSG build  →  site-encrypt post-process  →  deploy
+SSG build  →  ssg-encrypt post-process  →  deploy
 ```
 
 ## Features
@@ -38,14 +38,14 @@ Use the prebuilt binary straight from this repo's releases. Passwords always com
 
 ```yaml
 # Pull requests: validate without secrets (safe on forks, too)
-- uses: <owner>/site-encrypt@v1
+- uses: <owner>/ssg-encrypt@v1
   with:
     selector: "#encryptedBox"
     content-selector: "#articleContent"
     check: "true"
 
 # Deploy builds: encrypt after the SSG build, before deploy
-- uses: <owner>/site-encrypt@v1
+- uses: <owner>/ssg-encrypt@v1
   with:
     selector: "#encryptedBox"
     content-selector: "#articleContent"
@@ -66,7 +66,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build site
         run: zola build
-      - uses: <owner>/site-encrypt@v1
+      - uses: <owner>/ssg-encrypt@v1
         with:
           selector: "#encryptedBox"
           content-selector: "#articleContent"

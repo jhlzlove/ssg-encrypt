@@ -25,7 +25,7 @@ const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 
 #[derive(Parser, Debug)]
-#[command(name = "site-encrypt", version, about = "Encrypt marked static HTML content")]
+#[command(name = "ssg-encrypt", version, about = "Encrypt marked static HTML content")]
 struct Cli {
     #[arg(short, long, default_value = "encrypt.toml")]
     config: PathBuf,
@@ -338,7 +338,7 @@ fn validate_config(config: &Config) -> Result<()> {
 // committed file:
 //
 // ```yaml
-// - uses: <owner>/site-encrypt@v1
+// - uses: <owner>/ssg-encrypt@v1
 //   env:
 //     SITE_ENCRYPT_PASSWORDS: ${{ secrets.SITE_PASSWORDS }} # bulk: many passwords, one secret
 //     SITE_ENCRYPT_PASSWORDS_BLOG: ${{ secrets.BLOG_PASSWORD }} # or one var per password

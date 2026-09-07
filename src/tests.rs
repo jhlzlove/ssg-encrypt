@@ -92,7 +92,7 @@ fn env_name_mapping() {
 }
 
 fn test_feed_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("site-encrypt-test-{}-{}.xml", std::process::id(), name))
+    std::env::temp_dir().join(format!("ssg-encrypt-test-{}-{}.xml", std::process::id(), name))
 }
 
 #[test]
