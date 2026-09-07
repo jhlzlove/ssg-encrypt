@@ -48,3 +48,43 @@ jobs:
       - name: Assert dry-run wrote nothing
         shell: bash
         run: grep -q "fixture secret" .github/self-test/site/index.html
+
+      # No committed encrypt.toml at the repo root, so this exercises the
+      # inputs-generated config path (single rule + scalar inputs).
+      - name: Inputs-generated config (dry-run, no secrets needed)
+        id: gen
+        uses: ./
+        with:
+          selector: "#box"
+          iterations: "200000"
+          feed-placeholder: "SELFTEST-LOCKED"
+          input: .github/self-test/site
+          dry-run: "true"
+        env:
+          SITE_ENCRYPT_PASSWORDS: |
+            ci = "fixture-pw"
+
+      - name: Assert generated config content
+        shell: bash
+        run: |
+          cfg="${{ steps.gen.outputs.config-path }}"
+          grep -q 'selector = "#box"' "$cfg"
+          grep -q 'iterations = 200000' "$cfg"
+          grep -q 'placeholder = "SELFTEST-LOCKED"' "$cfg"
+          grep -q '^\[passwords\]$' "$cfg"
+
+      # Neither a config file nor inputs: must fail with guidance.
+      - name: No config and no selector must fail clearly
+        id: mustfail
+        continue-on-error: true
+        uses: ./
+        with:
+          check: "true"
+
+      - name: Assert the failure was the guidance error
+        shell: bash
+        run: |
+          if [ "${{ steps.mustfail.outcome }}" != "failure" ]; then
+            echo "::error::expected the no-config-no-selector run to fail"
+            exit 1
+          fi

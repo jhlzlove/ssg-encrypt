@@ -204,9 +204,18 @@ fn default_feed_placeholder() -> String {
     "This post is encrypted; open the original page to unlock it.".into()
 }
 
+fn read_config(path: &Path) -> Result<String> {
+    fs::read_to_string(path).with_context(|| {
+        format!(
+            "read config '{}': file not found — run from the site root or pass --config <path>",
+            path.display()
+        )
+    })
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let raw = fs::read_to_string(&cli.config).context("read config")?;
+    let raw = read_config(&cli.config)?;
     let mut config: Config = toml::from_str(&raw).context("parse config TOML")?;
     apply_env_overrides(&mut config)?;
     validate_config(&config)?;

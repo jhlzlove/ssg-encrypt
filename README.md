@@ -34,19 +34,21 @@ cargo run -- --input public
 
 ## GitHub Action
 
-Use the prebuilt binary straight from this repo's releases — passwords come from secrets via env, so the committed config holds no secrets:
+Use the prebuilt binary straight from this repo's releases. Passwords always come from secrets via env; everything else is `with:` inputs — **no config file needed** for the common single-rule case:
 
 ```yaml
 # Pull requests: validate without secrets (safe on forks, too)
 - uses: <owner>/site-encrypt@v1
   with:
+    selector: "#encryptedBox"
+    content-selector: "#articleContent"
     check: "true"
 
 # Deploy builds: encrypt after the SSG build, before deploy
 - uses: <owner>/site-encrypt@v1
   with:
-    input: public        # default
-    config: encrypt.toml # default
+    selector: "#encryptedBox"
+    content-selector: "#articleContent"
   env:
     # one secret holding many passwords (TOML `alias = "password"` lines)
     SITE_ENCRYPT_PASSWORDS: ${{ secrets.SITE_PASSWORDS }}
@@ -65,23 +67,43 @@ jobs:
       - name: Build site
         run: zola build
       - uses: <owner>/site-encrypt@v1
+        with:
+          selector: "#encryptedBox"
+          content-selector: "#articleContent"
         env:
-          SITE_ENCRYPT_PASSWORDS_BLOG: ${{ secrets.BLOG_PASSWORD }}
+          SITE_ENCRYPT_PASSWORDS: ${{ secrets.SITE_PASSWORDS }}
       - name: Deploy
         run: # ... your deploy step (e.g. peaceiris/actions-gh-pages)
 ```
+
+Config resolution, in order:
+
+1. A committed config file (`config`, default `encrypt.toml`) wins when present — all rule/scalar inputs below are ignored (logged as a notice).
+2. Otherwise a minimal config is generated from the inputs (in `$RUNNER_TEMP`, never committed; passwords never enter it).
+3. Neither → clear error telling you to commit a file or set `selector:`.
 
 Inputs reference:
 
 | Input | Default | Description |
 |---|---|---|
 | `input` | `public` | Built site directory to process in place. |
-| `config` | `encrypt.toml` | Config file path. |
+| `config` | `encrypt.toml` | Committed config file path (escape hatch for multi-rule setups). |
+| `selector` | `""` | Rule: CSS selector for the node carrying the password alias. Required when no config file is found. |
+| `content-selector` | `""` | Rule: CSS selector of the node whose children get encrypted (split-UI). Empty = self-contained mode. |
+| `password-id-attribute` | `""` (= `data-password-key`) | Rule: attribute holding the password alias. |
+| `hint-attribute` | `""` | Rule: attribute holding a password hint (self-contained only). |
+| `iterations` | `600000` | PBKDF2 iterations (≥ 100 000). |
+| `feeds-enabled` | `true` | Redact feed entries linking to encrypted pages. |
+| `feed-placeholder` | `""` (= CLI default) | Replacement text for redacted feed entries. |
+| `class-name` | `""` (= CLI default) | CSS class prefix for the injected unlock form. |
+| `password-label` / `submit-label` / `noscript-text` | `""` (= CLI defaults) | Unlock form strings. |
 | `dry-run` | `false` | Scan and validate without writing files. |
 | `check` | `false` | Only validate config + selectors (needs no passwords). |
 | `version` | `latest` | Release to use (e.g. `v0.1.0`) or `latest`. |
 | `repo` | _(this action's repo)_ | Override the release source (forks/mirrors). |
 | `github-token` | `${{ github.token }}` | Token for the `latest` lookup (avoids anonymous rate limits). |
+
+> **Note:** `SITE_ENCRYPT_*` env vars still override file values (including generated ones) as an escape hatch — but with the full `with:` interface you shouldn't need them for anything but passwords.
 
 ## Configuration
 

@@ -312,6 +312,14 @@ fn html_tree_collects_per_file_errors_and_continues() {
 }
 
 #[test]
+fn missing_config_error_guides() {
+    let err = read_config(Path::new("definitely-not-here-12345.toml")).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("--config"), "{msg}");
+    assert!(msg.contains("definitely-not-here-12345.toml"), "{msg}");
+}
+
+#[test]
 fn secret_never_prints() {
     assert_eq!(format!("{:?}", Secret("hunter2".to_string())), "***");
     let config = test_config(&[("k", "hunter2")]);
