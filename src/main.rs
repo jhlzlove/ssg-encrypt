@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    ops::Deref,
     path::{Path, PathBuf},
 };
 
@@ -15,6 +16,9 @@ use serde::Deserialize;
 use sha2::Sha256;
 use walkdir::WalkDir;
 
+#[cfg(test)]
+mod tests;
+
 const FORMAT_VERSION: u8 = 1;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
@@ -23,12 +27,32 @@ const KEY_LEN: usize = 32;
 #[derive(Parser, Debug)]
 #[command(name = "site-encrypt", version, about = "Encrypt marked static HTML content")]
 struct Cli {
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "encrypt.toml")]
     config: PathBuf,
     #[arg(short, long, default_value = "public")]
     input: PathBuf,
     #[arg(long)]
     dry_run: bool,
+    /// Validate the config + CSS selectors only. Touches nothing on disk
+    /// and needs no passwords — ideal for PR checks without secrets.
+    #[arg(long, conflicts_with = "dry_run")]
+    check: bool,
+}
+
+/// A password that never leaks through `Debug`: `Config` derives `Debug`,
+/// so a plain `String` here would print secrets into any debug log.
+#[derive(Clone, Deserialize)]
+struct Secret(String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("***")
+    }
+}
+
+impl Deref for Secret {
+    type Target = str;
+    fn deref(&self) -> &str { &self.0 }
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,7 +64,11 @@ struct Config {
     output: OutputConfig,
     #[serde(default)]
     feeds: FeedsConfig,
-    passwords: HashMap<String, String>,
+    /// Local-dev passwords. CI/production should provide passwords via
+    /// `SITE_ENCRYPT_PASSWORDS_<ALIAS>` env vars instead (env wins) —
+    /// this table may be left empty.
+    #[serde(default)]
+    passwords: HashMap<String, Secret>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,8 +87,11 @@ struct Rule {
     /// CSS selector of the node carrying the password id (and receiving the
     /// payload attributes + injected unlock UI in self-contained mode).
     selector: String,
-    /// Attribute on the matched node holding the password id (alias into
-    /// `[passwords]`).
+    /// Attribute on the matched node holding the password alias (maps to
+    /// `[passwords]` or `SITE_ENCRYPT_PASSWORDS_<ALIAS>`).
+    /// Defaults to `data-password-key`; override only if your markup
+    /// genuinely needs a different attribute name.
+    #[serde(default = "default_password_id_attribute")]
     password_id_attribute: String,
     #[serde(default)]
     hint_attribute: Option<String>,
@@ -85,8 +116,6 @@ impl Default for EncryptionConfig {
 
 #[derive(Debug, Deserialize)]
 struct OutputConfig {
-    #[serde(default = "default_true")]
-    remove_source_attributes: bool,
     #[serde(default = "default_class_name")]
     class_name: String,
     /// Copy for the injected unlock UI (self-contained mode only).
@@ -97,7 +126,6 @@ struct OutputConfig {
 impl Default for OutputConfig {
     fn default() -> Self {
         Self {
-            remove_source_attributes: true,
             class_name: default_class_name(),
             ui: UiStrings::default(),
         }
@@ -129,24 +157,18 @@ impl Default for UiStrings {
 
 /// Feed redaction: entries linking to encrypted pages get their
 /// `<content>`/`<summary>` (Atom) or `<description>` (RSS) replaced with a
-/// placeholder. Titles stay public (same policy as list pages).
-/// Matching is path-based (see `is_encrypted_url`): scheme/host are ignored,
-/// so localhost preview builds and production builds redact identically.
+/// placeholder. Titles stay public (same policy as list pages); only bodies
+/// are replaced. Matching is path-suffix based (see `is_encrypted_url`):
+/// scheme/host are ignored and leading segments need no configuration, so
+/// localhost preview builds, root deployments and subpath deployments
+/// redact identically.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FeedsConfig {
     #[serde(default)]
     enabled: bool,
     #[serde(default = "default_feed_paths")]
     paths: Vec<String>,
-    /// Subpath the site lives under, e.g. "/docs" for `example.com/docs`.
-    /// Stripped from entry paths before mapping to local files.
-    /// Empty (root-deployed sites, the common case) is fine.
-    #[serde(default)]
-    strip_prefix: String,
-    /// Deprecated: use `strip_prefix`. Kept parsing so old configs don't
-    /// break; only its path part was ever honoured anyway.
-    #[serde(default)]
-    base_url: String,
     #[serde(default = "default_feed_placeholder")]
     placeholder: String,
 }
@@ -156,27 +178,14 @@ impl Default for FeedsConfig {
         Self {
             enabled: false,
             paths: default_feed_paths(),
-            strip_prefix: String::new(),
-            base_url: String::new(),
             placeholder: default_feed_placeholder(),
         }
     }
 }
 
-impl FeedsConfig {
-    /// Effective path prefix to strip, honouring the deprecated alias.
-    fn effective_prefix(&self) -> String {
-        let direct = self.strip_prefix.trim_matches('/').to_string();
-        if !direct.is_empty() {
-            return direct;
-        }
-        url_path(&self.base_url).trim_matches('/').to_string()
-    }
-}
-
 fn default_extensions() -> Vec<String> { vec!["html".into()] }
 fn default_iterations() -> u32 { 600_000 }
-fn default_true() -> bool { true }
+fn default_password_id_attribute() -> String { "data-password-key".into() }
 fn default_class_name() -> String { "site-encrypt".into() }
 fn default_password_label() -> String { "Password".into() }
 fn default_submit_label() -> String { "Unlock".into() }
@@ -198,9 +207,19 @@ fn default_feed_placeholder() -> String {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let raw = fs::read_to_string(&cli.config).context("read config")?;
-    let config: Config = toml::from_str(&raw).context("parse config TOML")?;
+    let mut config: Config = toml::from_str(&raw).context("parse config TOML")?;
+    apply_env_overrides(&mut config)?;
     validate_config(&config)?;
     validate_selectors(&config)?;
+
+    if cli.check {
+        println!(
+            "Config OK: {} rule(s), {} password(s) available.",
+            config.scanner.rules.len(),
+            config.passwords.len()
+        );
+        return Ok(());
+    }
 
     let (files, encrypted, encrypted_files, html_errors) =
         process_html_tree(&cli.input, &config, cli.dry_run)?;
@@ -303,6 +322,113 @@ fn validate_config(config: &Config) -> Result<()> {
     Ok(())
 }
 
+// ── Env overrides ───────────────────────────────────────────────
+// Every variable below is optional: set-and-non-empty wins over the TOML
+// value, unset-or-empty leaves the file config untouched. This is the
+// GitHub Action channel — passwords come from secrets, never from a
+// committed file:
+//
+// ```yaml
+// - uses: <owner>/site-encrypt@v1
+//   env:
+//     SITE_ENCRYPT_PASSWORDS: ${{ secrets.SITE_PASSWORDS }} # bulk: many passwords, one secret
+//     SITE_ENCRYPT_PASSWORDS_BLOG: ${{ secrets.BLOG_PASSWORD }} # or one var per password
+// ```
+// Precedence: per-alias var > bulk var > TOML file.
+
+/// Overlay environment variables onto the file config (env wins).
+fn apply_env_overrides(config: &mut Config) -> Result<()> {
+    // Bulk passwords first: `SITE_ENCRYPT_PASSWORDS` holds TOML
+    // `alias = "password"` lines (one secret for many passwords):
+    //
+    // ```yaml
+    // env:
+    //   SITE_ENCRYPT_PASSWORDS: ${{ secrets.SITE_PASSWORDS }}
+    // # where SITE_PASSWORDS is:
+    // #   a = "123"
+    // #   b = "567"
+    // ```
+    if let Some(v) = env_value("SITE_ENCRYPT_PASSWORDS") {
+        let bulk: HashMap<String, Secret> = toml::from_str(&v).with_context(|| {
+            "env SITE_ENCRYPT_PASSWORDS is not valid TOML; \
+             expected `alias = \"password\"` lines with quoted passwords"
+        })?;
+        for (alias, secret) in bulk {
+            config.passwords.insert(alias, secret);
+        }
+    }
+    // TOML aliases first: the exact forward-mapped var wins, whatever the
+    // alias charset is.
+    let mut consumed: HashSet<String> = HashSet::new();
+    for alias in config.passwords.keys().cloned().collect::<Vec<_>>() {
+        let name = env_name_for_alias(&alias);
+        if let Some(secret) = env_secret(&name) {
+            config.passwords.insert(alias, secret);
+            consumed.insert(name);
+        }
+    }
+    // Env-only aliases (the CI case: empty `[passwords]`). The suffix is
+    // lowercased, so env-settable aliases should stick to `[a-z0-9_]+`.
+    const PREFIX: &str = "SITE_ENCRYPT_PASSWORDS_";
+    for (key, value) in std::env::vars() {
+        let Some(suffix) = key.strip_prefix(PREFIX) else { continue };
+        if consumed.contains(&key) || suffix.is_empty() || value.trim().is_empty() {
+            continue;
+        }
+        config
+            .passwords
+            .entry(suffix.to_lowercase())
+            .or_insert(Secret(value));
+    }
+
+    if let Some(v) = env_value("SITE_ENCRYPT_ITERATIONS") {
+        config.encryption.iterations = v
+            .parse()
+            .with_context(|| format!("env SITE_ENCRYPT_ITERATIONS is not a number: {v:?}"))?;
+    }
+    if let Some(v) = env_value("SITE_ENCRYPT_FEED_PLACEHOLDER") {
+        config.feeds.placeholder = v;
+    }
+    if let Some(v) = env_value("SITE_ENCRYPT_PASSWORD_LABEL") {
+        config.output.ui.password_label = v;
+    }
+    if let Some(v) = env_value("SITE_ENCRYPT_SUBMIT_LABEL") {
+        config.output.ui.submit_label = v;
+    }
+    if let Some(v) = env_value("SITE_ENCRYPT_NOSCRIPT_TEXT") {
+        config.output.ui.noscript_text = v;
+    }
+    Ok(())
+}
+
+/// Env name holding the password for `alias`: uppercased, every
+/// non-ASCII-alphanumeric char becomes `_`.
+/// e.g. `blog` → `SITE_ENCRYPT_PASSWORDS_BLOG`.
+fn env_name_for_alias(alias: &str) -> String {
+    let mut name = String::from("SITE_ENCRYPT_PASSWORDS_");
+    for c in alias.chars() {
+        if c.is_ascii_alphanumeric() {
+            name.push(c.to_ascii_uppercase());
+        } else {
+            name.push('_');
+        }
+    }
+    name
+}
+
+/// Set-and-non-empty env var, trimmed. Empty values are ignored so that
+/// `VAR: ""` in a workflow never blanks out the file config.
+fn env_value(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn env_secret(name: &str) -> Option<Secret> {
+    env_value(name).map(Secret)
+}
+
 /// Input-relative path with forward slashes, for matching + reporting.
 fn rel_path(input: &Path, path: &Path) -> String {
     path.strip_prefix(input)
@@ -389,13 +515,6 @@ fn process_feeds(
     if !cfg.enabled || encrypted_files.is_empty() {
         return Ok(0);
     }
-    if !cfg.base_url.trim().is_empty() {
-        eprintln!(
-            "warning: [feeds].base_url is deprecated and its host part is ignored; \
-             move the subpath (if any) to [feeds].strip_prefix"
-        );
-    }
-    let prefix = cfg.effective_prefix();
     let mut redacted = 0usize;
     for entry in WalkDir::new(input).follow_links(false) {
         let entry = entry.context("walk input directory for feeds")?;
@@ -406,14 +525,13 @@ fn process_feeds(
         if !cfg.paths.iter().any(|p| glob_match(p, &rel)) {
             continue;
         }
-        redacted += redact_feed_file(entry.path(), &prefix, &cfg.placeholder, encrypted_files, dry_run)?;
+        redacted += redact_feed_file(entry.path(), &cfg.placeholder, encrypted_files, dry_run)?;
     }
     Ok(redacted)
 }
 
 fn redact_feed_file(
     path: &Path,
-    strip_prefix: &str,
     placeholder: &str,
     encrypted_files: &HashSet<String>,
     dry_run: bool,
@@ -435,7 +553,7 @@ fn redact_feed_file(
                     .map(|(_, _, a, b)| block[*a..*b].trim().to_string())
             };
             let Some(url) = url else { continue };
-            if url.trim().is_empty() || !is_encrypted_url(strip_prefix, &url, encrypted_files) {
+            if url.trim().is_empty() || !is_encrypted_url(&url, encrypted_files) {
                 continue;
             }
             for sub in ["content", "summary", "description"] {
@@ -604,30 +722,33 @@ fn xml_escape(input: &str) -> String {
 }
 
 /// Map a feed entry URL back to files the HTML pass encrypted.
-/// Matches by URL **path only** (`{rel}/index.html`, `{rel}.html`, `{rel}`),
-/// ignoring scheme/host so localhost preview builds and production builds
-/// behave identically. `strip_prefix` (no slashes needed) is removed first
-/// for subpath deployments (`example.com/site`).
-/// Consequence: planet/aggregator feeds mixing foreign entries must exclude
-/// those feed files via `scanner.exclude` (same-path collisions would match).
-fn is_encrypted_url(strip_prefix: &str, url: &str, encrypted_files: &HashSet<String>) -> bool {
-    let mut rel = url_path(url).trim_matches('/').to_string();
-    let base = strip_prefix.trim_matches('/');
-    if !base.is_empty() {
-        if rel == base {
-            rel.clear();
-        } else if let Some(rest) = rel.strip_prefix(&format!("{base}/")) {
-            rel = rest.to_string();
-        } else {
-            return false;
-        }
-    }
+/// Matches by URL **path suffix** (`{rel}/index.html`, `{rel}.html`,
+/// `{rel}`), ignoring scheme/host so localhost preview builds and
+/// production builds behave identically. Leading segments are peeled until
+/// something matches, so subpath deployments (`example.com/docs/...`) need
+/// no configuration.
+/// Fail-closed: a same-tail public page redacts too (placeholder instead of
+/// body — never a leak). Consequence: planet/aggregator feeds mixing foreign
+/// entries must exclude those feed files via `scanner.exclude`.
+fn is_encrypted_url(url: &str, encrypted_files: &HashSet<String>) -> bool {
+    let rel = url_path(url).trim_matches('/');
     if rel.is_empty() {
         return encrypted_files.contains("index.html");
     }
-    [format!("{rel}/index.html"), format!("{rel}.html"), rel.to_string()]
-        .iter()
-        .any(|c| encrypted_files.contains(c.as_str()))
+    // Full path first, then peel leading segments (subpath deployments).
+    let mut rest = rel;
+    loop {
+        if [format!("{rest}/index.html"), format!("{rest}.html"), rest.to_string()]
+            .iter()
+            .any(|c| encrypted_files.contains(c.as_str()))
+        {
+            return true;
+        }
+        match rest.find('/') {
+            Some(i) => rest = &rest[i + 1..],
+            None => return false,
+        }
+    }
 }
 
 /// Path component of a feed URL: drops `scheme://host` (or protocol-relative
@@ -737,7 +858,8 @@ fn encrypt_node(node: &NodeRef, rule: &Rule, config: &Config, document: &NodeRef
         .get(&password_id)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "no password configured for password id '{password_id}'; add it to [passwords] in the config"
+                "no password configured for password id '{password_id}'; add it to [passwords] or set env {}",
+                env_name_for_alias(&password_id)
             )
         })?
         .clone();
@@ -800,7 +922,8 @@ fn encrypt_node(node: &NodeRef, rule: &Rule, config: &Config, document: &NodeRef
             );
         }
 
-        if config.output.remove_source_attributes {
+        // The password alias served its purpose at build time; never ship it.
+        {
             let mut attrs = element.attributes.borrow_mut();
             attrs.remove(rule.password_id_attribute.as_str());
             if let Some(h) = &rule.hint_attribute {
@@ -843,7 +966,8 @@ fn encrypt_node(node: &NodeRef, rule: &Rule, config: &Config, document: &NodeRef
     let source = body.unwrap_or(fragment);
     for child in source.children().collect::<Vec<_>>() { node.append(child); }
 
-    if config.output.remove_source_attributes {
+    // The password alias served its purpose at build time; never ship it.
+    {
         let mut attrs = element.attributes.borrow_mut();
         attrs.remove(rule.password_id_attribute.as_str());
         if let Some(h) = &rule.hint_attribute { attrs.remove(h.as_str()); }
@@ -909,300 +1033,4 @@ fn html_escape(input: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn encryption_is_randomized() {
-        let a = encrypt("hello", "password", 100_000).unwrap();
-        let b = encrypt("hello", "password", 100_000).unwrap();
-        assert_ne!(a.ciphertext, b.ciphertext);
-        assert_ne!(a.salt, b.salt);
-        assert_ne!(a.nonce, b.nonce);
-    }
-
-    #[test]
-    fn escaping_is_safe() {
-        assert_eq!(html_escape("<x a=\"b\">&"), "&lt;x a=&quot;b&quot;&gt;&amp;");
-    }
-
-    #[test]
-    fn glob_matching() {
-        assert!(glob_match("**/atom.xml", "atom.xml"));
-        assert!(glob_match("**/atom.xml", "tags/foo/atom.xml"));
-        assert!(!glob_match("**/atom.xml", "atom.xml.bak"));
-        assert!(glob_match("*.html", "index.html"));
-        assert!(!glob_match("*.html", "blog/index.html"));
-        assert!(glob_match("blog/**", "blog/a/b"));
-        assert!(glob_match("?.html", "a.html"));
-        assert!(!glob_match("?.html", "ab.html"));
-        assert!(!glob_match("404.html", "en/404.html"));
-        assert!(glob_match("**/404.html", "en/404.html"));
-    }
-
-    #[test]
-    fn encrypted_url_mapping() {
-        let set: HashSet<String> = HashSet::from(["blog/secret/index.html".to_string()]);
-        // subpath deployment: prefix "/site" stripped, host ignored
-        assert!(is_encrypted_url("/site", "https://example.com/site/blog/secret/", &set));
-        assert!(is_encrypted_url("site", "https://example.com/site/blog/secret", &set));
-        assert!(is_encrypted_url(
-            "/site",
-            "https://example.com/site/blog/secret/?x=1#frag",
-            &set
-        ));
-        assert!(!is_encrypted_url("/site", "https://example.com/site/blog/open/", &set));
-        assert!(!is_encrypted_url("/site", "https://example.com/other/blog/secret/", &set));
-        assert!(!is_encrypted_url("/site", "https://example.com/site-blog/secret/", &set));
-        // root deployment / localhost preview: empty prefix, host ignored
-        assert!(is_encrypted_url("", "http://localhost:3000/blog/secret/", &set));
-        assert!(is_encrypted_url("", "/blog/secret/", &set)); // bare path
-        // same path on a foreign host still matches: planet/aggregator feeds
-        // mixing outside entries must exclude those feed files instead.
-        assert!(is_encrypted_url("/site", "https://other.example/site/blog/secret/", &set));
-    }
-
-    #[test]
-    fn deprecated_base_url_still_feeds_prefix() {
-        // old configs keep working: only the path part is honoured
-        let cfg = FeedsConfig {
-            enabled: true,
-            paths: default_feed_paths(),
-            strip_prefix: String::new(),
-            base_url: "https://example.com/site".into(),
-            placeholder: default_feed_placeholder(),
-        };
-        assert_eq!(cfg.effective_prefix(), "site");
-        let cfg2 = FeedsConfig {
-            strip_prefix: "/docs".into(),
-            ..FeedsConfig::default()
-        };
-        assert_eq!(cfg2.effective_prefix(), "docs");
-        assert_eq!(FeedsConfig::default().effective_prefix(), "");
-    }
-
-    fn test_feed_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("site-encrypt-test-{}-{}.xml", std::process::id(), name))
-    }
-
-    #[test]
-    fn atom_feed_redaction() {
-        let path = test_feed_path("atom");
-        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
-<entry><title>t1</title><link rel="alternate" type="text/html" href="http://localhost:3000/blog/secret/"/><id>1</id><content type="html">&lt;p&gt;hidden body&lt;/p&gt;</content><summary>hidden summary</summary></entry>
-<entry><title>t2</title><link href="https://example.com/blog/open/" rel="alternate"/><id>2</id><content type="html">&lt;p&gt;public body&lt;/p&gt;</content></entry>
-</feed>"#;
-        fs::write(&path, xml).unwrap();
-        let files: HashSet<String> = HashSet::from(["blog/secret/index.html".to_string()]);
-        let n = redact_feed_file(&path, "", "LOCKED", &files, false).unwrap();
-        assert_eq!(n, 1);
-        let out = fs::read_to_string(&path).unwrap();
-        assert!(!out.contains("hidden body"));
-        assert!(!out.contains("hidden summary"));
-        assert!(out.contains("LOCKED"));
-        assert!(out.contains("public body"));
-        // rerun is a no-op
-        let n2 = redact_feed_file(&path, "", "LOCKED", &files, false).unwrap();
-        assert_eq!(n2, 0);
-        fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn rss_feed_redaction() {
-        let path = test_feed_path("rss");
-        let xml = r#"<?xml version="1.0"?>
-<rss version="2.0"><channel>
-<item><title>t1</title><link>https://example.com/blog/secret/</link><description><p>hidden rss</p></description></item>
-<item><title>t2</title><link>https://example.com/blog/open/</link><description><p>public rss</p></description></item>
-</channel></rss>"#;
-        fs::write(&path, xml).unwrap();
-        let files: HashSet<String> = HashSet::from(["blog/secret/index.html".to_string()]);
-        let n = redact_feed_file(&path, "", "LOCKED", &files, false).unwrap();
-        assert_eq!(n, 1);
-        let out = fs::read_to_string(&path).unwrap();
-        assert!(!out.contains("hidden rss"));
-        assert!(out.contains("public rss"));
-        fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn content_selector_mode_encrypts_elsewhere_and_skips_rerun() {
-        let html = "<!DOCTYPE html><html><body>\
-            <div class=\"encrypted\" id=\"encryptedBox\" data-password-key=\"k1\">\
-            <form><input type=\"password\"></form></div>\
-            <div class=\"article__content\" id=\"articleContent\" hidden><p>secret</p></div>\
-            </body></html>";
-        let document: NodeRef = kuchiki::parse_html().one(html);
-        let rule = Rule {
-            selector: "#encryptedBox".into(),
-            password_id_attribute: "data-password-key".into(),
-            hint_attribute: None,
-            content_selector: Some("#articleContent".into()),
-        };
-        let config = Config {
-            scanner: ScannerConfig {
-                extensions: vec!["html".into()],
-                exclude: vec![],
-                rules: vec![],
-            },
-            encryption: EncryptionConfig { iterations: 100_000 },
-            output: OutputConfig {
-                remove_source_attributes: true,
-                class_name: "site-encrypt".into(),
-                ui: UiStrings::default(),
-            },
-            feeds: FeedsConfig::default(),
-            passwords: HashMap::from([("k1".to_string(), "pw".to_string())]),
-        };
-        let node = document
-            .select_first("#encryptedBox")
-            .unwrap()
-            .as_node()
-            .clone();
-        assert!(encrypt_node(&node, &rule, &config, &document).unwrap());
-        // content container emptied, theme lock UI untouched
-        let content = document
-            .select_first("#articleContent")
-            .unwrap()
-            .as_node()
-            .clone();
-        assert_eq!(content.children().count(), 0);
-        assert!(document.select_first("#encryptedBox form").is_ok());
-        // payload published on the matched node, alias attr removed
-        {
-            let attrs = node.as_element().unwrap().attributes.borrow();
-            assert_eq!(attrs.get("data-site-encrypt-version"), Some("1"));
-            assert_eq!(attrs.get("data-site-encrypt-iterations"), Some("100000"));
-            assert!(attrs.get("data-site-encrypt-salt").is_some());
-            assert!(attrs.get("data-site-encrypt-nonce").is_some());
-            assert!(attrs.get("data-site-encrypt-ciphertext").is_some());
-            assert_eq!(
-                attrs.get("data-site-encrypt-target"),
-                Some("#articleContent")
-            );
-            assert!(attrs.get("data-password-key").is_none());
-        }
-        // re-running on processed output is a no-op (no double encryption)
-        assert!(!encrypt_node(&node, &rule, &config, &document).unwrap());
-    }
-
-    fn test_rule(content_selector: Option<&str>) -> Rule {
-        Rule {
-            selector: "#box".into(),
-            password_id_attribute: "data-password-key".into(),
-            hint_attribute: None,
-            content_selector: content_selector.map(str::to_string),
-        }
-    }
-
-    fn test_config(passwords: &[(&str, &str)]) -> Config {
-        Config {
-            scanner: ScannerConfig {
-                extensions: vec!["html".into()],
-                exclude: vec![],
-                rules: vec![],
-            },
-            encryption: EncryptionConfig { iterations: 100_000 },
-            output: OutputConfig {
-                remove_source_attributes: true,
-                class_name: "site-encrypt".into(),
-                ui: UiStrings::default(),
-            },
-            feeds: FeedsConfig::default(),
-            passwords: passwords
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-        }
-    }
-
-    fn parse_doc(html: &str) -> NodeRef {
-        kuchiki::parse_html().one(html)
-    }
-
-    #[test]
-    fn example_config_parses_and_validates() {
-        let path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("encrypt.example.toml");
-        let raw = fs::read_to_string(&path).unwrap();
-        let config: Config = toml::from_str(&raw).unwrap();
-        validate_config(&config).unwrap();
-        validate_selectors(&config).unwrap();
-        assert!(!config.scanner.rules.is_empty());
-    }
-
-    #[test]
-    fn content_selector_multiple_matches_is_an_error() {
-        let document = parse_doc(
-            "<!DOCTYPE html><html><body>\
-            <div id=\"box\" data-password-key=\"k1\"></div>\
-            <div class=\"c\"><p>a</p></div><div class=\"c\"><p>b</p></div>\
-            </body></html>",
-        );
-        let rule = test_rule(Some(".c"));
-        let config = test_config(&[("k1", "pw")]);
-        let node = document.select_first("#box").unwrap().as_node().clone();
-        let err = encrypt_node(&node, &rule, &config, &document).unwrap_err();
-        assert!(
-            err.to_string().contains("more than one"),
-            "unexpected error: {err:#}"
-        );
-    }
-
-    #[test]
-    fn unknown_password_id_error_names_the_fix() {
-        let document = parse_doc(
-            "<!DOCTYPE html><html><body>\
-            <div id=\"box\" data-password-key=\"nope\"></div>\
-            <div id=\"content\"><p>secret</p></div>\
-            </body></html>",
-        );
-        let rule = test_rule(Some("#content"));
-        let config = test_config(&[("k1", "pw")]);
-        let node = document.select_first("#box").unwrap().as_node().clone();
-        let err = encrypt_node(&node, &rule, &config, &document).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("nope"), "unexpected error: {msg}");
-        assert!(msg.contains("[passwords]"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn html_tree_collects_per_file_errors_and_continues() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("good.html"),
-            "<!DOCTYPE html><html><body>\
-            <div id=\"box\" data-password-key=\"k1\"></div>\
-            <div id=\"content\"><p>secret</p></div>\
-            </body></html>",
-        )
-        .unwrap();
-        fs::write(
-            dir.path().join("bad.html"),
-            "<!DOCTYPE html><html><body>\
-            <div id=\"box\" data-password-key=\"nope\"></div>\
-            <div id=\"content\"><p>secret</p></div>\
-            </body></html>",
-        )
-        .unwrap();
-        let mut config = test_config(&[("k1", "pw")]);
-        config.scanner.rules.push(Rule {
-            selector: "#box".into(),
-            ..test_rule(Some("#content"))
-        });
-        let (files, encrypted, encrypted_files, errors) =
-            process_html_tree(dir.path(), &config, true).unwrap();
-        assert_eq!(files, 2);
-        assert_eq!(encrypted, 1);
-        assert_eq!(encrypted_files.len(), 1);
-        assert_eq!(errors.len(), 1);
-        assert!(
-            errors[0].contains("bad.html") && errors[0].contains("nope"),
-            "unexpected errors: {errors:?}"
-        );
-    }
 }

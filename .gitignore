@@ -1,2 +1,4 @@
 /target
 *.secret.toml
+# Local config with real passwords (see encrypt.example.toml).
+encrypt.toml

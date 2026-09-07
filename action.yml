@@ -1,0 +1,55 @@
+name: "site-encrypt"
+description: "Encrypt marked static HTML content (AES-256-GCM + PBKDF2) after your SSG build"
+branding:
+  icon: "lock"
+  color: "blue"
+
+inputs:
+  input:
+    description: "Built site directory to process in place"
+    default: "public"
+  config:
+    description: "Config file path (committed file holds no secrets; passwords come via env)"
+    default: "encrypt.toml"
+  dry-run:
+    description: "'true' to scan and validate without writing files"
+    default: "false"
+  check:
+    description: "'true' to only validate config + selectors (needs no passwords, ideal for PRs)"
+    default: "false"
+  version:
+    description: "site-encrypt release to use (e.g. 'v0.1.0') or 'latest'"
+    default: "latest"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install site-encrypt
+      shell: bash
+      run: |
+        set -euo pipefail
+        REPO="${GITHUB_ACTION_REPOSITORY:?}"
+        VERSION="${{ inputs.version }}"
+        if [ "$VERSION" = "latest" ]; then
+          VERSION="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)"
+          echo "Resolved latest version: $VERSION"
+        fi
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)   TARGET="x86_64-unknown-linux-gnu" ;;
+          Windows-X64) TARGET="x86_64-pc-windows-msvc" ;;
+          macOS-ARM64) TARGET="aarch64-apple-darwin" ;;
+          *) echo "::error::unsupported platform ${RUNNER_OS}-${RUNNER_ARCH}"; exit 1 ;;
+        esac
+        mkdir -p "$RUNNER_TEMP/site-encrypt-bin"
+        curl -fsSL "https://github.com/$REPO/releases/download/$VERSION/site-encrypt-$TARGET.tar.gz" \
+          | tar -xz -C "$RUNNER_TEMP/site-encrypt-bin"
+        echo "$RUNNER_TEMP/site-encrypt-bin" >> "$GITHUB_PATH"
+
+    - name: Encrypt site
+      shell: bash
+      run: |
+        set -euo pipefail
+        args=(--config "${{ inputs.config }}" --input "${{ inputs.input }}")
+        if [ "${{ inputs.dry-run }}" = "true" ]; then args+=(--dry-run); fi
+        if [ "${{ inputs.check }}" = "true" ]; then args+=(--check); fi
+        site-encrypt "${args[@]}"
