@@ -1,0 +1,23 @@
+[package]
+name = "site-encrypt"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Generator-agnostic static HTML content encryption using AES-256-GCM and PBKDF2"
+license = "MIT"
+
+[dependencies]
+aes-gcm = "0.10"
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+kuchiki = "0.8"
+pbkdf2 = { version = "0.12", features = ["sha2"] }
+rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+toml = "0.9"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,72 @@
+# site-encrypt configuration example
+# Copy this file to encrypt.toml and adjust. encrypt.toml is git-ignored
+# (via *.secret.toml) — never commit real passwords.
+
+[scanner]
+# File extensions to process.
+extensions = ["html"]
+
+# Relative paths to skip (forward slashes; supports *, ?, **).
+# Examples: "404.html", "print/**", "archive/**".
+exclude = []
+
+# Encryption rules. A page can have multiple rules; each rule maps a CSS
+# selector to a password alias.
+[[scanner.rules]]
+# CSS selector for the node carrying the password id.
+selector = "#encryptedBox"
+# Attribute on that node holding the password alias (maps to [passwords]).
+password_id_attribute = "data-password-key"
+
+# --- Split-UI mode (recommended) ---
+# When content_selector is set, the children of THAT node are encrypted
+# and the payload is written onto the matched node above. No unlock UI
+# is injected — use this when your theme already provides its own unlock UI.
+content_selector = "#articleContent"
+
+# --- Self-contained mode (alternative) ---
+# If you omit content_selector, the matched node's own children are
+# encrypted and a generic unlock form is injected in their place.
+# Optional: hint_attribute points to an attribute holding a password hint
+# displayed inside the injected unlock form.
+# hint_attribute = "data-hint"
+
+# A second rule would look like this:
+# [[scanner.rules]]
+# selector = ".locked-post"
+# password_id_attribute = "data-password-key"
+# content_selector = ".post-body"
+
+[encryption]
+# PBKDF2 iterations. Minimum 100 000 (enforced). Only increase.
+iterations = 600000
+
+[output]
+# Remove the password-id and hint attributes after encryption.
+remove_source_attributes = true
+# CSS class prefix for the injected unlock form (self-contained mode only).
+class_name = "site-encrypt"
+
+# Localized strings for the injected unlock form (self-contained mode only).
+# [output.ui]
+# password_label = "Password"
+# submit_label = "Unlock"
+# noscript_text = "JavaScript is required to decrypt this content."
+
+[feeds]
+# Redact Atom/RSS entries that link to encrypted pages.
+enabled = true
+# Glob patterns for feed files.
+paths = ["**/atom.xml", "**/rss.xml", "**/feed.xml", "**/index.xml"]
+# Subpath the site lives under (e.g. "/docs" for example.com/docs).
+# Root-deployed sites: leave empty.
+# strip_prefix = ""
+# Replacement text for encrypted feed entries.
+placeholder = "本文已加密，前往原文解锁后阅读。"
+
+# Map password aliases to real passwords.
+# Aliases appear in your HTML; real passwords live ONLY here.
+# Never commit this file to a public repo.
+[passwords]
+blog = "replace-this"
+# private = "another-password"
