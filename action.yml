@@ -84,6 +84,7 @@ runs:
         INPUT_PASSWORD_LABEL: ${{ inputs.password-label }}
         INPUT_SUBMIT_LABEL: ${{ inputs.submit-label }}
         INPUT_NOSCRIPT_TEXT: ${{ inputs.noscript-text }}
+        SITE_ENCRYPT_PASSWORDS: ${{ env.SITE_ENCRYPT_PASSWORDS }}
       run: |
         set -euo pipefail
         if [ -f "$INPUT_CONFIG" ]; then
@@ -141,9 +142,12 @@ runs:
           echo ""
           echo "# Passwords come from SITE_ENCRYPT_PASSWORDS* env only."
           echo "[passwords]"
+          if [ -n "${SITE_ENCRYPT_PASSWORDS:-}" ]; then
+            printf '%s\n' "$SITE_ENCRYPT_PASSWORDS"
+          fi
         } > "$OUT"
         echo "Generated config from inputs:"
-        cat "$OUT"
+        sed '/^\[passwords\]/,$ s/=.*$/= "***"/' "$OUT"
         echo "config-path=$OUT" >> "$GITHUB_OUTPUT"
     - name: Install site-encrypt
       shell: bash
@@ -186,4 +190,7 @@ runs:
         args=(--config "${{ steps.resolve.outputs.config-path }}" --input "${{ inputs.input }}")
         if [ "${{ inputs.dry-run }}" = "true" ]; then args+=(--dry-run); fi
         if [ "${{ inputs.check }}" = "true" ]; then args+=(--check); fi
+        echo "Generated config:"
+        sed '/\[passwords\]/,$ s/=.*/= "***"/' \
+          /home/runner/work/_temp/site-encrypt-generated.toml
         site-encrypt "${args[@]}"
