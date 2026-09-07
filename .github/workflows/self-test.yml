@@ -1,0 +1,50 @@
+name: self-test
+
+# Exercises the composite action end to end on all three platforms.
+# Needs at least one published release (the action downloads its binary
+# from Release assets): tag v0.1.0 first, green from then on.
+# `uses: ./` runs THIS checkout's action.yml against the latest binary,
+# so action changes are tested before any new release.
+on:
+  push:
+    paths:
+      - "action.yml"
+      - ".github/workflows/self-test.yml"
+      - ".github/self-test/**"
+      - "encrypt.example.toml"
+  pull_request:
+    paths:
+      - "action.yml"
+      - ".github/workflows/self-test.yml"
+      - ".github/self-test/**"
+      - "encrypt.example.toml"
+  workflow_dispatch:
+
+jobs:
+  test-action:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check mode on the committed example (no secrets needed)
+        uses: ./
+        with:
+          config: encrypt.example.toml
+          check: "true"
+
+      - name: Dry-run with bulk env passwords (no secrets needed)
+        uses: ./
+        with:
+          config: .github/self-test/encrypt.toml
+          input: .github/self-test/site
+          dry-run: "true"
+        env:
+          SITE_ENCRYPT_PASSWORDS: |
+            ci = "fixture-pw"
+
+      - name: Assert dry-run wrote nothing
+        shell: bash
+        run: grep -q "fixture secret" .github/self-test/site/index.html

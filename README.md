@@ -71,6 +71,18 @@ jobs:
         run: # ... your deploy step (e.g. peaceiris/actions-gh-pages)
 ```
 
+Inputs reference:
+
+| Input | Default | Description |
+|---|---|---|
+| `input` | `public` | Built site directory to process in place. |
+| `config` | `encrypt.toml` | Config file path. |
+| `dry-run` | `false` | Scan and validate without writing files. |
+| `check` | `false` | Only validate config + selectors (needs no passwords). |
+| `version` | `latest` | Release to use (e.g. `v0.1.0`) or `latest`. |
+| `repo` | _(this action's repo)_ | Override the release source (forks/mirrors). |
+| `github-token` | `${{ github.token }}` | Token for the `latest` lookup (avoids anonymous rate limits). |
+
 ## Configuration
 
 Copy `encrypt.example.toml` to `encrypt.toml` (git-ignored — never commit real passwords) and adjust:

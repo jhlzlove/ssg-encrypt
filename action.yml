@@ -20,18 +20,37 @@ inputs:
   version:
     description: "site-encrypt release to use (e.g. 'v0.1.0') or 'latest'"
     default: "latest"
+  repo:
+    description: "Override the repository to download releases from (for forks/mirrors). Empty = this action's own repository"
+    default: ""
+  github-token:
+    description: "Token for api.github.com 'latest' lookup (avoids anonymous rate limits on shared runners)"
+    default: ${{ github.token }}
 
 runs:
   using: "composite"
   steps:
     - name: Install site-encrypt
       shell: bash
+      env:
+        # NOTE: github.action_repository is EMPTY inside a composite run:
+        # script (actions/runner#2473) but resolves fine via env:.
+        ACTION_REPO: ${{ github.action_repository }}
+        INPUT_REPO: ${{ inputs.repo }}
+        INPUT_VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
-        REPO="${GITHUB_ACTION_REPOSITORY:?}"
-        VERSION="${{ inputs.version }}"
+        REPO="${INPUT_REPO:-$ACTION_REPO}"
+        if [ -z "$REPO" ]; then
+          echo "::error::cannot determine the action repository; set the 'repo' input (owner/name)"
+          exit 1
+        fi
+        VERSION="$INPUT_VERSION"
         if [ "$VERSION" = "latest" ]; then
-          VERSION="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)"
+          VERSION="$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/releases/latest" \
+            | grep '"tag_name"' | cut -d'"' -f4)"
           echo "Resolved latest version: $VERSION"
         fi
         case "${RUNNER_OS}-${RUNNER_ARCH}" in
